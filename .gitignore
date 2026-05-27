@@ -1,0 +1,19 @@
+# Local Claude Code state — never publish
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Scratch artifacts
+*.log
+tmp/
