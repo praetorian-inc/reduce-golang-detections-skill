@@ -449,7 +449,157 @@ def analyze_pe(filepath, label=""):
         'imphash': pe.get_imphash(),
     }
 
-    # ===== 13. ANOMALY SCORES (composite) =====
+    # ===== 13. EDR MODEL FEATURES (verified from kernel driver RE) =====
+
+    # Re (Recognition) — import capability categories
+    # Maps imported APIs to Re01-Re43 indicator codes
+    re_api_map = {
+        'Re01': ['createtoolhelp32snapshot', 'process32first', 'process32firstw', 'process32next', 'process32nextw', 'enumprocesses'],
+        'Re03': ['setwindowshookexa', 'setwindowshookexw', 'getasynckeystate', 'getkeystate'],
+        'Re05': ['adjusttokenprivileges', 'openprocesstoken'],
+        'Re07': ['createprocessa', 'createprocessw', 'shellexecutea', 'shellexecutew', 'winexec'],
+        'Re09': ['readprocessmemory', 'ntreadvirtualmemory'],
+        'Re10': ['writeprocessmemory', 'ntwritevirtualmemory'],
+        'Re11': ['regsetvalueexa', 'regsetvalueexw', 'regcreatekeyexa', 'regcreatekeyexw'],
+        'Re12': ['regqueryvalueexa', 'regqueryvalueexw', 'regenumkeyexa'],
+        'Re13': ['openscmanagera', 'openscmanagerw', 'createservicea', 'createservicew'],
+        'Re14': ['openclipboard', 'getclipboarddata', 'setclipboarddata'],
+        'Re17': ['virtualallocex', 'ntallocatevirtualmemory'],
+        'Re18': ['createremotethread', 'createremotethreadex', 'rtlcreateuserthread', 'ntcreatethreadex'],
+        'Re19': ['loadlibrarya', 'loadlibraryw', 'loadlibraryexa', 'loadlibraryexw', 'ldrloaddll'],
+        'Re25': ['terminateprocess', 'ntterminateprocess'],
+        'Re26': ['openprocess', 'ntopenprocess'],
+        'Re27': ['getthreadcontext', 'setthreadcontext', 'ntgetcontextthread', 'ntsetcontextthread'],
+        'Re28': ['suspendthread', 'resumethread', 'ntsuspendthread'],
+        'Re29': ['urldownloadtofilea', 'urldownloadtofilew', 'winhttpconnect'],
+        'Re30': ['socket', 'connect', 'send', 'recv', 'wsastartup'],
+        'Re32': ['cryptacquirecontexta', 'cryptencrypt', 'cryptdecrypt', 'bcryptencrypt'],
+        'Re34': ['createnamedpipea', 'createnamedpipew', 'connectnamedpipe'],
+        'Re36': ['winhttpopen', 'httpsendrequesta', 'internetopena', 'httpopenrequesta'],
+        'Re37': ['mapviewoffile', 'mapviewoffileex', 'ntmapviewofsection'],
+        'Re38': ['virtualprotect', 'virtualprotectex', 'ntprotectvirtualmemory'],
+        'Re39': ['deviceiocontrol', 'ntdeviceiocontrolfile'],
+        'Re40': ['createmutexa', 'createmutexw', 'openmutexa'],
+        'Re42': ['bitblt', 'getdc', 'printwindow', 'getwindowdc'],
+        'Re43': ['debugactiveprocess', 'waitfordebugevent', 'debugbreakprocess'],
+    }
+
+    re_importance = {
+        'Re07': 27, 'Re27': 25, 'Re40': 25, 'ReUM': 22, 'Re01': 22, 'Re03': 22,
+        'Re17': 21, 'Re18': 21, 'Re26': 21, 'Re09': 21, 'Re13': 21,
+        'Re42': 21, 'ReTe': 21, 'Re10': 0, 'Re11': 0, 'Re12': 0,
+        'Re05': 0, 'Re14': 0, 'Re19': 0, 'Re25': 0, 'Re28': 0,
+        'Re29': 0, 'Re30': 0, 'Re32': 0, 'Re34': 0, 'Re36': 0,
+        'Re37': 0, 'Re38': 0, 'Re39': 0, 'Re43': 0,
+    }
+
+    all_imports_lower = set()
+    if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
+        for entry in pe.DIRECTORY_ENTRY_IMPORT:
+            for imp in entry.imports:
+                if imp.name:
+                    all_imports_lower.add(imp.name.decode().lower())
+
+    re_triggered = {}
+    for re_code, apis in re_api_map.items():
+        matching = [a for a in apis if a in all_imports_lower]
+        if matching:
+            re_triggered[re_code] = matching
+
+    re_um_triggered = len(import_dlls) > 4 or total_imports > 80
+    if re_um_triggered:
+        re_triggered['ReUM'] = [f'{len(import_dlls)} DLLs, {total_imports} imports']
+
+    features['edr_re_codes'] = {
+        'triggered': re_triggered,
+        'triggered_count': len(re_triggered),
+        'triggered_codes': sorted(re_triggered.keys()),
+        'total_importance': sum(re_importance.get(c, 0) for c in re_triggered),
+        'high_importance_triggered': sorted(
+            [(c, re_importance.get(c, 0)) for c in re_triggered if re_importance.get(c, 0) >= 21],
+            key=lambda x: -x[1]
+        ),
+    }
+
+    # BM (Binary Metadata) — PE header presence/absence checks
+    bm_triggered = []
+    if fh.NumberOfSections == 1:
+        bm_triggered.append('BM12_single_section')
+    if len(import_dlls) == 1:
+        bm_triggered.append('BM34_single_import_dll')
+    if data_dirs.get('DEBUG', {}).get('size', 0) > 0:
+        bm_triggered.append('BM11_debug_dir_present')
+    if data_dirs.get('SECURITY', {}).get('size', 0) > 0:
+        bm_triggered.append('BM22_certificate_present')
+    if data_dirs.get('CLR_RUNTIME', {}).get('size', 0) > 0:
+        bm_triggered.append('BM30_clr_header')
+    if data_dirs.get('DELAY_IMPORT', {}).get('size', 0) > 0:
+        bm_triggered.append('BM33_delay_import')
+    if data_dirs.get('IAT', {}).get('size', 0) > 0:
+        bm_triggered.append('BM35_iat_present')
+
+    # Check for non-standard section names (BM16)
+    standard_names = {'.text', '.data', '.rdata', '.rsrc', '.reloc', '.pdata',
+                      '.bss', '.edata', '.idata', '.tls', '.debug', 'INIT', 'PAGE'}
+    nonstandard = [s['name'] for s in features.get('sections', {}).get('details', [])
+                   if s.get('name', '') not in standard_names
+                   and not s.get('name', '').startswith('/')]
+    if nonstandard:
+        bm_triggered.append(f'BM16_nonstandard_names({len(nonstandard)})')
+
+    features['edr_bm_codes'] = {
+        'triggered': bm_triggered,
+        'triggered_count': len(bm_triggered),
+    }
+
+    # FPE (Feature PE) — entropy and structure
+    fpe_triggered = []
+    text_entropy = 0.0
+    for s in features.get('sections', {}).get('details', []):
+        if s.get('name') in ('.text', '.code'):
+            text_entropy = s.get('entropy', 0)
+            if text_entropy > 7.0:
+                fpe_triggered.append(f'FPE0_high_text_entropy({text_entropy:.2f})')
+
+    # W+X sections
+    for s in features.get('sections', {}).get('details', []):
+        if s.get('is_executable') and s.get('is_writable'):
+            fpe_triggered.append(f'FPE1_wx_section({s.get("name")})')
+
+    if features.get('overlay', {}).get('present'):
+        fpe_triggered.append('FPE2_overlay_present')
+
+    features['edr_fpe_codes'] = {
+        'triggered': fpe_triggered,
+        'triggered_count': len(fpe_triggered),
+        'text_entropy': round(text_entropy, 4),
+    }
+
+    # 10KB cloud boundary analysis
+    features['cloud_boundary'] = {
+        'first_10kb_size': min(total_size, 10000),
+        'content_beyond_10kb': max(0, total_size - 10000),
+        'pct_visible_to_cloud': round(min(10000, total_size) / total_size * 100, 1) if total_size > 0 else 0,
+    }
+
+    # Estimated EDR model score (rough approximation)
+    total_indicators = len(re_triggered) + len(bm_triggered) + len(fpe_triggered)
+    features['edr_score_estimate'] = {
+        'total_indicators_triggered': total_indicators,
+        're_codes_triggered': len(re_triggered),
+        'bm_codes_triggered': len(bm_triggered),
+        'fpe_codes_triggered': len(fpe_triggered),
+        'estimated_strong_trees': min(20, total_indicators),
+        'estimated_score_range': f'{total_indicators * 0.5:.0f}–{min(45, total_indicators * 2.25):.0f}',
+        'verdict': (
+            'LIKELY CLEAN' if total_indicators <= 8
+            else 'BORDERLINE' if total_indicators <= 12
+            else 'LIKELY DETECTED' if total_indicators <= 16
+            else 'HIGH CONFIDENCE DETECTION'
+        ),
+    }
+
+    # ===== 14. ANOMALY SCORES (composite) =====
     anomalies = 0
     anomaly_details = []
 
@@ -561,6 +711,27 @@ def flat_features_for_csv(features):
     # Anomaly
     flat['anomaly_score'] = features['anomaly_score']['total']
     flat['anomaly_details'] = '|'.join(features['anomaly_score']['details'])
+
+    # EDR model features
+    edr_re = features.get('edr_re_codes', {})
+    flat['edr_re_count'] = edr_re.get('triggered_count', 0)
+    flat['edr_re_codes'] = '|'.join(edr_re.get('triggered_codes', []))
+    flat['edr_re_importance'] = edr_re.get('total_importance', 0)
+
+    edr_bm = features.get('edr_bm_codes', {})
+    flat['edr_bm_count'] = edr_bm.get('triggered_count', 0)
+    flat['edr_bm_codes'] = '|'.join(edr_bm.get('triggered', []))
+
+    edr_fpe = features.get('edr_fpe_codes', {})
+    flat['edr_fpe_count'] = edr_fpe.get('triggered_count', 0)
+    flat['edr_fpe_text_entropy'] = edr_fpe.get('text_entropy', 0)
+
+    cloud = features.get('cloud_boundary', {})
+    flat['cloud_pct_visible'] = cloud.get('pct_visible_to_cloud', 0)
+
+    score = features.get('edr_score_estimate', {})
+    flat['edr_total_indicators'] = score.get('total_indicators_triggered', 0)
+    flat['edr_verdict'] = score.get('verdict', '')
 
     return flat
 

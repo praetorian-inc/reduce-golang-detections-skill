@@ -14,6 +14,26 @@ This means:
 - Multiple small anomalies that point in the same direction are detected with high confidence
 - Fighting the toolchain identity adds inconsistency signals that raise the score
 
+## Verified On-Sensor Model Architecture
+
+Reverse engineering of a major EDR vendor's kernel driver and on-sensor ML model
+produced verified feature weights:
+
+- **1,000-dimensional binary feature vector** — each feature is binary (present/absent)
+- **20 gradient-boosted trees**, 8,976 nodes, ~9,100 leaf weights
+- **Purely additive scoring** — ALL leaf weights positive (0.05–2.25), zero negative
+- **10 static analysis passes** run on every file at kernel level:
+  BM (PE headers, 38 features), Re (imports, 43 features), BR (byte patterns, 98 features),
+  CR (content patterns, 18), cC (content category, 34), Te (strings, 24), FPE (entropy, 3),
+  Pes (sections, 3), Fs (filesystem, 11), AS (aggregates, 13)
+- **BM pass uses zero/non-zero checks** — PE fields checked for presence, not value
+- **BM12 flags single-section PEs, BM34 flags single-import PEs** — Go safe here
+- **ReUM (import breadth) is rank #15** — import table diversity is penalized
+- **FPE0 entropy threshold** inferred ~7.0 for code sections (macOS equivalent: 7.0–7.8)
+- **Cloud model receives first 10KB only** — content beyond that boundary is invisible
+- **Kernel driver does NOT import ZwProtectVirtualMemory** — memory protection changes invisible
+- **Signature patterns (BR pass) update daily** — byte pattern evasion is transient
+
 ## Feature Category Reference
 
 ### 1. Header Fields (High ML Weight)
@@ -47,14 +67,25 @@ layout, import style, and string patterns still scream Go. Inconsistency = highe
 global variable allocation. Vanilla Go hello-world has 6.4x. This is load-bearing — cannot
 be easily changed without modifying the linker.
 
-### 3. Import Table (High ML Weight)
+### 3. Import Table (High ML Weight — Verified)
 
-| Feature | Vanilla Go | Modified Build |
-|---------|-----------|-----------------|
-| DLL count | 1 | 4 |
-| Total imports | 47 | 53 |
-| GetProcAddress present | Yes | Yes |
-| LoadLibraryExW present | Yes | Yes (duplicated) |
+| Feature | Vanilla Go | Modified Build | On-sensor EDR feature |
+|---------|-----------|-----------------|---------------------|
+| DLL count | 1 | 4 | **ReUM (rank #15)** — diversity penalized |
+| Total imports | 47 | 53 | Contributes to ReUM score |
+| GetProcAddress present | Yes | Yes | Re19 (MayLoadDynamicLibrary) |
+| LoadLibraryExW present | Yes | Yes (duplicated) | Re19 |
+| CreateProcess* present | Via Go runtime | Via Go runtime | **Re07 (rank #3)** — highest-weight import |
+| CreateMutex* present | If sync used | If sync used | **Re40 (rank #7)** — surprisingly high weight |
+
+**The EDR's import analysis pass checks the IAT/ILT only.** APIs resolved via GetProcAddress
+at runtime are invisible. The model has 43 import category indicators (Re01–Re43) plus ReUM (breadth).
+
+**Import pruning priority by verified model weight:**
+1. Remove any import triggering Re07 (CreateProcess) if not needed — rank #3
+2. Remove any import triggering Re40 (CreateMutex) — rank #7, use events instead
+3. Minimize total DLL count — ReUM (rank #15) penalizes breadth
+4. Remove unused DLLs with 1-2 functions — AVG/Avast Evo-gen heuristic
 
 **Unused import heuristic** (AVG/Avast Win64:Evo-gen): DLLs with only 1-2 functions that
 are never called in the code trigger detection. Cap at 3 enriched DLLs max.
