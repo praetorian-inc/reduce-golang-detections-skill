@@ -9,14 +9,17 @@ Before running any experiment, classify the proposed change. Category determines
 Changes that make the binary more consistent with a vanilla binary from the same toolchain.
 These reduce anomaly count without creating toolchain inconsistencies.
 
-| Change | Target Feature | Expected Direction |
-|--------|---------------|-------------------|
-| Remove phantom .edata section | phantom_edata anomaly | -1 anomaly |
-| Revert stack reserve to Go default (0x200000) | stack_reserve inconsistency | -1 anomaly |
-| Prune enriched DLLs to ≤3 | unused_import heuristic | -1 engine (AVG/Avast) |
-| Remove risky DLL names (netapi32, ole32, winhttp) | AVG/Avast Evo-gen | Engine-specific |
-| Prune risky product names from VERSIONINFO pool | product name corpus | Engine-specific |
-| Prune risky file versions | version ML feature | Engine-specific |
+| Change | Target Feature | Expected Direction | On-sensor model feature |
+|--------|---------------|-------------------|---------------------|
+| Remove phantom .edata section | phantom_edata anomaly | -1 anomaly | BM07 (Export dir) |
+| Revert stack reserve to Go default (0x200000) | stack_reserve inconsistency | -1 anomaly | BM03-04 |
+| Prune enriched DLLs to ≤3 | unused_import heuristic | -1 engine (AVG/Avast) | **ReUM (rank #15)** |
+| Remove risky DLL names (netapi32, ole32, winhttp) | AVG/Avast Evo-gen | Engine-specific | ReUM + specific Re codes |
+| Prune risky product names from VERSIONINFO pool | product name corpus | Engine-specific | Te pass |
+| Prune risky file versions | version ML feature | Engine-specific | Te pass |
+| Remove CreateMutex imports if sync not needed | Re40 on-sensor indicator | **Model rank #7** | **Re40 (25 tree refs)** |
+| Minimize total import DLL count | Import diversity score | **Model rank #15** | **ReUM (22 tree refs)** |
+| Ensure .text entropy stays < 7.0 | Entropy threshold | Avoids FPE0 trigger | **FPE0 (feature 950)** |
 
 **Expected behavior**: Lowers anomaly score, moves toward vanilla baseline delta.
 **Risk**: Low — making things look more like vanilla Go is safe.
